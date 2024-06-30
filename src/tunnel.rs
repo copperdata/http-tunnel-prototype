@@ -315,6 +315,54 @@ pub async fn relay_connections<
     })
 }
 
+pub async fn relay_connections_with_collector<
+    D: AsyncRead + AsyncWrite + Sized + Send + Unpin + 'static,
+    U: AsyncRead + AsyncWrite + Sized + Send + 'static,
+    C: AsyncRead + AsyncWrite + Sized + Send + 'static,
+>(
+    client: D,
+    target: U,
+    collector: C,
+    ctx: TunnelCtx,
+    downstream_relay_policy: RelayPolicy,
+    upstream_relay_policy: RelayPolicy,
+) -> io::Result<TunnelStats> {
+    let (client_recv, client_send) = io::split(client);
+    let (target_recv, target_send) = io::split(target);
+    let (_, collector_send) = io::split(collector);
+
+    let downstream_relay: Relay = RelayBuilder::default()
+        .name("Downstream")
+        .tunnel_ctx(ctx)
+        .relay_policy(downstream_relay_policy)
+        .build()
+        .expect("RelayBuilder failed");
+
+    let upstream_relay: Relay = RelayBuilder::default()
+        .name("Upstream")
+        .tunnel_ctx(ctx)
+        .relay_policy(upstream_relay_policy)
+        .build()
+        .expect("RelayBuilder failed");
+
+    let upstream_task =
+        tokio::spawn(async move { downstream_relay.relay_data_broadcast(client_recv, target_send, collector_send).await });
+
+    let downstream_task =
+        tokio::spawn(async move { upstream_relay.relay_data(target_recv, client_send).await });
+
+    let downstream_stats = downstream_task.await??;
+    // TODO: add collector stats
+    let upstream_stats = upstream_task.await??;
+
+    Ok(TunnelStats {
+        tunnel_ctx: ctx,
+        result: EstablishTunnelResult::Ok,
+        upstream_stats: Some(upstream_stats),
+        downstream_stats: Some(downstream_stats),
+    })
+}
+
 // cov:begin-ignore-line
 impl fmt::Display for TunnelCtx {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {

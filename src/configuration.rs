@@ -63,6 +63,7 @@ struct Cli {
     #[clap(long)]
     config: Option<String>,
     /// Bind address, e.g. 0.0.0.0:8443.
+    // TODO: Add collector address and establish connection similar to target.
     #[clap(long)]
     bind: String,
     #[clap(subcommand)]

@@ -14,6 +14,9 @@ use log::{debug, error, info};
 use tokio::io;
 use tokio::io::{AsyncReadExt, AsyncWriteExt, ReadHalf, WriteHalf};
 use tokio::time::timeout;
+use tokio::sync::broadcast;
+use tokio::sync::oneshot;
+use tokio::sync::mpsc;
 
 pub const NO_TIMEOUT: Duration = Duration::from_secs(300);
 pub const NO_BANDWIDTH_LIMIT: u64 = 1_000_000_000_000_u64;
@@ -118,6 +121,101 @@ impl Relay {
             let write_result = self
                 .relay_policy
                 .timed_operation(dest.write_all(&buffer[..n]))
+                .await;
+
+            if write_result.is_err() {
+                shutdown_reason = RelayShutdownReasons::WriterTimeout;
+                break;
+            }
+
+            if let Err(e) = write_result.unwrap() {
+                error!(
+                    "{} failed to write {} bytes. Err = {:?}, CTX={}",
+                    self.name, n, e, self.tunnel_ctx
+                );
+                shutdown_reason = RelayShutdownReasons::WriteError;
+                break;
+            }
+
+            total_bytes += n;
+            event_count += 1;
+
+            if let Err(rate_violation) = self
+                .relay_policy
+                .check_transmission_rates(&start_time, total_bytes)
+            {
+                shutdown_reason = rate_violation;
+                break;
+            }
+        }
+
+        self.shutdown(&mut dest, &shutdown_reason).await;
+
+        let duration = Instant::now().duration_since(start_time);
+
+        let stats = RelayStatsBuilder::default()
+            .shutdown_reason(shutdown_reason)
+            .total_bytes(total_bytes)
+            .event_count(event_count)
+            .duration(duration)
+            .build()
+            .expect("RelayStatsBuilder failed");
+
+        info!("{} closed: {}, CTX={}", self.name, stats, self.tunnel_ctx);
+
+        Ok(stats)
+    }
+
+    pub async fn relay_data_broadcast<R: AsyncReadExt + Sized, W: AsyncWriteExt + Sized, C: AsyncWriteExt + Sized>(
+        self,
+        mut source: ReadHalf<R>,
+        mut dest: WriteHalf<W>,
+        mut collector: WriteHalf<C>,
+    ) -> io::Result<RelayStats> {
+        let mut buffer = [0; BUFFER_SIZE];
+        
+        let mut total_bytes = 0;
+        let mut event_count = 0;
+        let start_time = Instant::now();
+        let shutdown_reason;
+
+        loop {
+            let read_result = self
+                .relay_policy
+                .timed_operation(source.read(&mut buffer))
+                .await;
+
+            if read_result.is_err() {
+                shutdown_reason = RelayShutdownReasons::ReaderTimeout;
+                break;
+            }
+
+            let n = match read_result.unwrap() {
+                Ok(0) => {
+                    shutdown_reason = RelayShutdownReasons::GracefulShutdown;
+                    break;
+                }
+                Ok(n) => n,
+                Err(e) => {
+                    error!(
+                        "{} failed to read. Err = {:?}, CTX={}",
+                        self.name, e, self.tunnel_ctx
+                    );
+                    shutdown_reason = RelayShutdownReasons::ReadError;
+                    break;
+                }
+            };
+
+            let write_result = self
+                .relay_policy
+                .timed_operation(dest.write_all(&buffer[..n]))
+                .await;
+
+            // tx.send(&buffer[..n]).await.unwrap();
+
+            let collector_result = self
+                .relay_policy
+                .timed_operation(collector.write_all(&buffer[..n]))
                 .await;
 
             if write_result.is_err() {
