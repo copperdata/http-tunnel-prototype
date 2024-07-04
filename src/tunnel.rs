@@ -64,6 +64,7 @@ pub struct ConnectionTunnel<H, C, T> {
     target_connector: T,
     client: Option<C>,
     tunnel_config: TunnelConfig,
+    collector_config: TunnelConfig,
 }
 
 #[async_trait]
@@ -110,6 +111,8 @@ where
             tunnel_ctx,
             client: Some(client),
             tunnel_config,
+            // TODO: Fix
+            collector_config,
         }
     }
 
@@ -143,6 +146,34 @@ where
         relay_connections(
             client,
             target,
+            self.tunnel_ctx,
+            self.tunnel_config.client_connection.relay_policy,
+            self.tunnel_config.target_connection.relay_policy,
+        )
+        .await
+    }
+
+    pub async fn start_with_collector(mut self) -> io::Result<TunnelStats> {
+        let stream = self.client.take().expect("downstream can be taken once");
+
+        let tunnel_result = self
+            .establish_tunnel_with_collector(stream, self.tunnel_config.clone(), self.collector_config.clone())
+            .await;
+
+        if let Err(error) = tunnel_result {
+            return Ok(TunnelStats {
+                tunnel_ctx: self.tunnel_ctx,
+                result: error,
+                upstream_stats: None,
+                downstream_stats: None,
+            });
+        }
+
+        let (client, target, collector) = tunnel_result.unwrap();
+        relay_connections_with_collector(
+            client,
+            target,
+            collector,
             self.tunnel_ctx,
             self.tunnel_config.client_connection.relay_policy,
             self.tunnel_config.target_connection.relay_policy,
@@ -185,6 +216,61 @@ where
                     let original_stream = framed.into_inner();
 
                     Ok((original_stream, u))
+                }
+            }
+        } else {
+            Err(EstablishTunnelResult::RequestTimeout)
+        }
+    }
+
+    async fn establish_tunnel_with_collector(
+        &mut self,
+        stream: C,
+        configuration: TunnelConfig,
+        collector_configuration: TunnelConfig,
+    ) -> Result<(C, T::Stream, T::Stream), EstablishTunnelResult> {
+        debug!("Accepting HTTP tunnel request: CTX={}", self.tunnel_ctx);
+
+        let (mut write, mut read) = self
+            .tunnel_request_codec
+            .take()
+            .expect("establish_tunnel can be called only once")
+            .framed(stream)
+            .split();
+
+        let (response, target) = self.process_tunnel_request(&configuration, &mut read).await;
+        let (collector_response, collector_target) = self.process_tunnel_request(&collector_configuration, &mut read).await;
+
+        let response_sent = match response {
+            EstablishTunnelResult::OkWithNugget => true,
+            _ => timeout(
+                configuration.client_connection.initiation_timeout,
+                write.send(response.clone()),
+            )
+            .await
+            .is_ok(),
+        };
+
+        let collector_reponse_sent = match response {
+            EstablishTunnelResult::OkWithNugget => true,
+            _ => timeout(
+                configuration.client_connection.initiation_timeout,
+                write.send(collector_response.clone()),
+            )
+            .await
+            .is_ok(),
+        };
+
+        if response_sent {
+            match target {
+                None => Err(response),
+                Some(u) => {
+                    // lets take the original stream to either relay data, or to drop it on error
+                    let framed = write.reunite(read).expect("Uniting previously split parts");
+                    let original_stream = framed.into_inner();
+                    let collector_stream = collector_target.unwrap();
+
+                    Ok((original_stream, u, collector_stream))
                 }
             }
         } else {

@@ -75,6 +75,8 @@ async fn main() -> io::Result<()> {
         ProxyMode::Tcp(d) => {
             let destination = d.clone();
             serve_tcp(proxy_configuration, dns_resolver, destination).await?;
+            // let collector_destination: String = String::from("http://0.0.0.0:3000");
+            // serve_tcp_with_collector(proxy_configuration, dns_resolver, destination, collector_destination).await?;
         }
     };
 

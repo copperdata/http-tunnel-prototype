@@ -164,7 +164,13 @@ where
                     return Err(Error::from(ErrorKind::TimedOut));
                 }
             }
-            Ok(stream)
+            let collector_tcp_stream = timeout(self.connect_timeout, TcpStream::connect(collector_addr)).await.unwrap();
+
+            let collector_stream = collector_tcp_stream?;
+
+            // collector_stream.nodelay()?;
+
+            Ok((stream, collector_stream))
         } else {
             error!(
                 "Timeout connecting to {}, {}, CTX={}",
