@@ -12,11 +12,13 @@ extern crate derive_builder;
 extern crate serde_derive;
 
 use log::{error, info, LevelFilter};
+use proxy_target::TargetWithCollectorConnector;
 use rand::{thread_rng, Rng};
 use tokio::io;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::time::timeout;
 use tokio_native_tls::TlsAcceptor;
+use tunnel::relay_connections_with_collector;
 
 use crate::configuration::{ProxyConfiguration, ProxyMode};
 use crate::http_tunnel_codec::{HttpTunnelCodec, HttpTunnelCodecBuilder, HttpTunnelTarget};
@@ -197,6 +199,76 @@ async fn serve_tcp(
                                 destination,
                                 ctx,
                                 config_copy.tunnel_config.client_connection.relay_policy,
+                                config_copy.tunnel_config.target_connection.relay_policy,
+                            )
+                            .await;
+
+                            report_tunnel_metrics(ctx, stats);
+                        }
+                        Err(e) => error!("Failed to establish TCP upstream connection {:?}", e),
+                    }
+                });
+            }
+            Err(e) => error!("Failed TCP handshake {}", e),
+        }
+    }
+}
+
+async fn serve_tcp_with_collector(
+    config: ProxyConfiguration,
+    dns_resolver: DnsResolver,
+    destination: String,
+    collector: String,
+) -> io::Result<()> {
+    let listener = start_listening_tcp(&config).await?;
+
+    loop {
+        // Asynchronously wait for an inbound socket.
+        let socket = listener.accept().await;
+
+        let dns_resolver_ref = dns_resolver.clone();
+        let destination_copy = destination.clone();
+        let collector_copy = collector.clone();
+        let config_copy = config.clone();
+
+        match socket {
+            Ok((stream, _)) => {
+                let config = config.clone();
+                stream.nodelay().unwrap_or_default();
+                // handle accepted connections asynchronously
+                tokio::spawn(async move {
+                    let ctx = TunnelCtxBuilder::default()
+                        .id(thread_rng().gen::<u128>())
+                        .build()
+                        .expect("TunnelCtxBuilder failed");
+
+                    let mut connector: SimpleTcpConnector<HttpTunnelTarget, DnsResolver> =
+                        SimpleTcpConnector::new(
+                            dns_resolver_ref,
+                            config.tunnel_config.target_connection.connect_timeout,
+                            ctx,
+                        );
+
+                    match connector
+                        .connect_with_collector(
+                            &HttpTunnelTarget {
+                            target: destination_copy,
+                            nugget: None,
+                            },
+                            &HttpTunnelTarget {
+                                target: collector_copy,
+                                nugget: None,
+                            }
+                        )
+                        .await
+                    {
+                        Ok((destination, collector)) => {
+                            let stats = relay_connections_with_collector(
+                                stream, 
+                                destination, 
+                                collector,
+                                ctx, 
+                                config_copy.tunnel_config.client_connection.relay_policy, 
                                 config_copy.tunnel_config.target_connection.relay_policy,
                             )
                             .await;

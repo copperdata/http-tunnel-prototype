@@ -31,6 +31,20 @@ pub trait TargetConnector {
 }
 
 #[async_trait]
+pub trait TargetWithCollectorConnector {
+    type Target: TunnelTarget + Send + Sync + Sized;
+    type Stream: AsyncRead + AsyncWrite + Send + Sized + 'static;
+    type CollectorTarget: TunnelTarget + Send + Sync + Sized;
+    type CollectorStream: AsyncRead + AsyncWrite + Send + Sized + 'static;
+
+    async fn connect_with_collector(
+        &mut self, 
+        target: &Self::Target, 
+        collector: &Self::CollectorTarget
+    ) -> io::Result<(Self::Stream, Self::CollectorStream)>;
+}
+
+#[async_trait]
 pub trait DnsResolver {
     async fn resolve(&mut self, target: &str) -> io::Result<SocketAddr>;
 }
@@ -78,6 +92,59 @@ where
 
         let addr = self.dns_resolver.resolve(target_addr).await?;
 
+        if let Ok(tcp_stream) = timeout(self.connect_timeout, TcpStream::connect(addr)).await {
+            let mut stream = tcp_stream?;
+            stream.nodelay()?;
+            if target.has_nugget() {
+                if let Ok(written_successfully) = timeout(
+                    self.connect_timeout,
+                    stream.write_all(&target.nugget().data()),
+                )
+                .await
+                {
+                    written_successfully?;
+                } else {
+                    error!(
+                        "Timeout sending nugget to {}, {}, CTX={}",
+                        addr, target_addr, self.tunnel_ctx
+                    );
+                    return Err(Error::from(ErrorKind::TimedOut));
+                }
+            }
+            Ok(stream)
+        } else {
+            error!(
+                "Timeout connecting to {}, {}, CTX={}",
+                addr, target_addr, self.tunnel_ctx
+            );
+            Err(Error::from(ErrorKind::TimedOut))
+        }
+    }
+}
+
+#[async_trait]
+impl<D, R> TargetWithCollectorConnector for SimpleTcpConnector<D, R>
+where
+    D: TunnelTarget<Addr = String> + Send + Sync + Sized,
+    R: DnsResolver + Send + Sync + 'static,
+{
+    type Target = D;
+    type Stream = TcpStream;
+    type CollectorTarget = D;
+    type CollectorStream = TcpStream;
+
+    async fn connect_with_collector(
+        &mut self, 
+        target: &Self::Target, 
+        collector: &Self::CollectorTarget
+    )  -> io::Result<(Self::Stream, Self::CollectorStream)> {
+        let target_addr = &target.target_addr();
+        let collector_target_addr = &collector.target_addr();
+
+        let addr = self.dns_resolver.resolve(target_addr).await?;
+        let collector_addr = self.dns_resolver.resolve(collector_target_addr).await?;
+        
+        // TODO: Collect both stream and return as Ok if both return
         if let Ok(tcp_stream) = timeout(self.connect_timeout, TcpStream::connect(addr)).await {
             let mut stream = tcp_stream?;
             stream.nodelay()?;
