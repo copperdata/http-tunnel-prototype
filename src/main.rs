@@ -11,6 +11,7 @@ extern crate derive_builder;
 #[macro_use]
 extern crate serde_derive;
 
+use configuration::TunnelConfig;
 use log::{error, info, LevelFilter};
 use proxy_target::TargetWithCollectorConnector;
 use rand::{thread_rng, Rng};
@@ -18,7 +19,7 @@ use tokio::io;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::time::timeout;
 use tokio_native_tls::TlsAcceptor;
-use tunnel::relay_connections_with_collector;
+use tunnel::{relay_connections_with_collector, ConnectionTunnelWithCollector};
 
 use crate::configuration::{ProxyConfiguration, ProxyMode};
 use crate::http_tunnel_codec::{HttpTunnelCodec, HttpTunnelCodecBuilder, HttpTunnelTarget};
@@ -353,6 +354,54 @@ async fn tunnel_stream<C: AsyncRead + AsyncWrite + Send + Unpin + 'static>(
     );
 
     let stats = ConnectionTunnel::new(codec, connector, client, config.tunnel_config.clone(), ctx)
+        .start()
+        .await;
+
+    report_tunnel_metrics(ctx, stats);
+
+    Ok(())
+}
+
+async fn tunnel_stream_with_collector<C: AsyncRead + AsyncWrite + Send + Unpin + 'static>(
+    config: &ProxyConfiguration,
+    client: C,
+    dns_resolver: DnsResolver,
+) -> io::Result<()> {
+    let ctx = TunnelCtxBuilder::default()
+        .id(thread_rng().gen::<u128>())
+        .build()
+        .expect("TunnelCtxBuilder failed");
+
+    // here it can be any codec.
+    let codec: HttpTunnelCodec = HttpTunnelCodecBuilder::default()
+        .tunnel_ctx(ctx)
+        .enabled_targets(
+            config
+                .tunnel_config
+                .target_connection
+                .allowed_targets
+                .clone(),
+        )
+        .build()
+        .expect("HttpTunnelCodecBuilder failed");
+
+    // any `TargetConnector` would do.
+    let connector: SimpleTcpConnector<HttpTunnelTarget, DnsResolver> = SimpleTcpConnector::new(
+        dns_resolver,
+        config.tunnel_config.target_connection.connect_timeout,
+        ctx,
+    );
+
+    let collector_config = TunnelConfig::default();
+
+    let stats = ConnectionTunnelWithCollector::new(
+        codec, 
+        connector, 
+        client, 
+        config.tunnel_config.clone(), 
+        ctx,
+        collector_config
+    )
         .start()
         .await;
 
