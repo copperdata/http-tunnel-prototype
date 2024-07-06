@@ -281,15 +281,13 @@ where
     }
 }
 
-impl<H, C, T, D> ConnectionTunnelWithCollector<H, C, T>
+impl<H, C, T> ConnectionTunnelWithCollector<H, C, T>
 where
     H: Decoder<Error = EstablishTunnelResult> + Encoder<EstablishTunnelResult>,
     H::Item: TunnelTarget + Sized + Display + Send + Sync,
     C: AsyncRead + AsyncWrite + Sized + Send + Unpin + 'static,
     T: TargetWithCollectorConnector<Target = H::Item>,
-    D: TunnelTarget<Addr = String> + Send + Sync + Sized
 {
-    type CollectorTarget = D;
 
     pub fn new(
         handshake_codec: H,
@@ -353,8 +351,8 @@ where
             .framed(stream)
             .split();
 
-        let (response, target) = self.process_tunnel_request(&configuration, &mut read).await;
-        let (collector_response, collector_target) = self.process_tunnel_request(&collector_configuration, &mut read).await;
+        let (response, target_streams) = self.process_tunnel_request(&configuration, &mut read).await;
+        // let (collector_response, collector_target) = self.process_tunnel_request(&collector_configuration, &mut read).await;
 
         let response_sent = match response {
             EstablishTunnelResult::OkWithNugget => true,
@@ -366,24 +364,26 @@ where
             .is_ok(),
         };
 
-        let collector_reponse_sent = match response {
-            EstablishTunnelResult::OkWithNugget => true,
-            _ => timeout(
-                configuration.client_connection.initiation_timeout,
-                write.send(collector_response.clone()),
-            )
-            .await
-            .is_ok(),
-        };
+        // let collector_reponse_sent = match response {
+        //     EstablishTunnelResult::OkWithNugget => true,
+        //     _ => timeout(
+        //         configuration.client_connection.initiation_timeout,
+        //         write.send(collector_response.clone()),
+        //     )
+        //     .await
+        //     .is_ok(),
+        // };
+
+        // let target_stream = Some(target_streams);
 
         if response_sent {
-            match target {
+            match target_streams {
                 None => Err(response),
-                Some(u) => {
+                Some(streams) => {
                     // lets take the original stream to either relay data, or to drop it on error
                     let framed = write.reunite(read).expect("Uniting previously split parts");
                     let original_stream = framed.into_inner();
-                    let collector_stream = collector_target.unwrap();
+                    let (u, collector_stream) = streams;
 
                     Ok((original_stream, u, collector_stream))
                 }
@@ -399,7 +399,7 @@ where
         read: &mut SplitStream<Framed<C, H>>,
     ) -> (
         EstablishTunnelResult,
-        Option<<T as TargetWithCollectorConnector>::Stream>,
+        Option<(<T as TargetWithCollectorConnector>::Stream, <T as TargetWithCollectorConnector>::Stream)>,
     ) {
         let connect_request = timeout(
             configuration.client_connection.initiation_timeout,
@@ -410,11 +410,6 @@ where
         let response;
         let mut target = None;
 
-        let collector_target = HttpTunnelTarget {
-            target: String::from("localhost:3000"),
-            nugget: None,
-        };
-
         if connect_request.is_err() {
             error!("Client established TLS connection but failed to send an HTTP request within {:?}, CTX={}",
                    configuration.client_connection.initiation_timeout,
@@ -422,18 +417,19 @@ where
             response = EstablishTunnelResult::RequestTimeout;
         } else if let Ok(Some(event)) = connect_request {
             match event {
+                // TODO: Get decoded target for collector as well to match type
                 Ok(decoded_target) => {
                     let has_nugget = decoded_target.has_nugget();
                     response = match self
                         .connect_to_target(
                             decoded_target,
-                            collector_target,
                             configuration.target_connection.connect_timeout,
                         )
                         .await
                     {
                         Ok(t) => {
                             target = Some(t);
+                            
                             if has_nugget {
                                 EstablishTunnelResult::OkWithNugget
                             } else {
@@ -458,23 +454,18 @@ where
         &mut self,
         target: T::Target,
         connect_timeout: Duration,
-    ) -> Result<T::Stream, EstablishTunnelResult> {
+    ) -> Result<(T::Stream, T::Stream), EstablishTunnelResult> {
         debug!(
             "Establishing HTTP tunnel target connection: {}, CTX={}",
             target, self.tunnel_ctx,
         );
 
-        let collector_target = HttpTunnelTarget {
-            target: String::from("localhost:3000"),
-            nugget: None,
-        };
-
         let timed_connection_result =
-            timeout(connect_timeout, self.target_connector.connect_with_collector(&target, collector_target)).await;
+            timeout(connect_timeout, self.target_connector.connect_with_collector(&target)).await;
 
         if let Ok(timed_connection_result) = timed_connection_result {
             match timed_connection_result {
-                Ok(tcp_stream) => Ok(tcp_stream),
+                Ok((tcp_stream, collector_stream)) => Ok((tcp_stream, collector_stream)),
                 Err(e) => Err(EstablishTunnelResult::from(e)),
             }
         } else {

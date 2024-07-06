@@ -149,7 +149,8 @@ async fn serve_plain_text(config: ProxyConfiguration, dns_resolver: DnsResolver)
                 stream.nodelay().unwrap_or_default();
                 let config = config.clone();
                 // handle accepted connections asynchronously
-                tokio::spawn(async move { tunnel_stream(&config, stream, dns_resolver_ref).await });
+                // tokio::spawn(async move { tunnel_stream(&config, stream, dns_resolver_ref).await });
+                tokio::spawn(async move { tunnel_stream_with_collector(&config, stream, dns_resolver_ref).await });
             }
             Err(e) => error!("Failed TCP handshake {}", e),
         }
@@ -221,7 +222,6 @@ async fn serve_tcp_with_collector(
     config: ProxyConfiguration,
     dns_resolver: DnsResolver,
     destination: String,
-    collector: String,
 ) -> io::Result<()> {
     let listener = start_listening_tcp(&config).await?;
 
@@ -231,7 +231,6 @@ async fn serve_tcp_with_collector(
 
         let dns_resolver_ref = dns_resolver.clone();
         let destination_copy = destination.clone();
-        let collector_copy = collector.clone();
         let config_copy = config.clone();
 
         match socket {
@@ -258,10 +257,6 @@ async fn serve_tcp_with_collector(
                             target: destination_copy,
                             nugget: None,
                             },
-                            &HttpTunnelTarget {
-                                target: collector_copy,
-                                nugget: None,
-                            }
                         )
                         .await
                     {

@@ -40,8 +40,8 @@ pub trait TargetWithCollectorConnector {
     async fn connect_with_collector(
         &mut self, 
         target: &Self::Target, 
-        collector: &Self::CollectorTarget
-    ) -> io::Result<(Self::Stream, Self::CollectorStream)>;
+        // collector: &Self::CollectorTarget
+    ) -> io::Result<(Self::Stream, Self::Stream)>;
 }
 
 #[async_trait]
@@ -136,13 +136,13 @@ where
     async fn connect_with_collector(
         &mut self, 
         target: &Self::Target, 
-        collector: &Self::CollectorTarget
-    )  -> io::Result<(Self::Stream, Self::CollectorStream)> {
+        // collector: &Self::CollectorTarget
+    )  -> io::Result<(Self::Stream, Self::Stream)> {
         let target_addr = &target.target_addr();
-        let collector_target_addr = &collector.target_addr();
+        // let collector_target_addr = &collector.target_addr();
 
         let addr = self.dns_resolver.resolve(target_addr).await?;
-        let collector_addr = self.dns_resolver.resolve(collector_target_addr).await?;
+        let collector_addr = self.dns_resolver.resolve(&String::from("localhost:3000")).await?;
         
         // TODO: Collect both stream and return as Ok if both return
         if let Ok(tcp_stream) = timeout(self.connect_timeout, TcpStream::connect(addr)).await {
